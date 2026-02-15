@@ -64,6 +64,13 @@ class StrategyV1:
 
         # 计算指标
         rets = np.array([r['return'] for r in daily_returns])
+        if len(rets) == 0:
+            return {
+                'annual_return': 0,
+                'max_drawdown': 0,
+                'sharpe': 0,
+                'total_return': 0
+            }
         cum = np.cumprod(1 + rets)
         total_return = cum[-1] - 1
         n_years = len(rets) / 252

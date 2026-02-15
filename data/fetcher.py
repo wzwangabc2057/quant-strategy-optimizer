@@ -46,7 +46,7 @@ class DataFetcher:
         codes_str = "','".join(codes)
         try:
             result = self.client.query(f"""
-                SELECT code, eps, bvps,
+                SELECT code, toString(report_date) as report_date, eps, bvps,
                        CASE WHEN bvps > 0 THEN eps / bvps * 100 ELSE NULL END as roe,
                        operating_revenue, net_profit
                 FROM stock_financial
@@ -54,10 +54,10 @@ class DataFetcher:
                 ORDER BY report_date DESC LIMIT 1 BY code
             """)
             return pd.DataFrame(result.result_rows,
-                               columns=['code', 'eps', 'bvps', 'roe', 'revenue', 'net_profit'])
+                               columns=['code', 'report_date', 'eps', 'bvps', 'roe', 'revenue', 'net_profit'])
         except Exception as e:
             print(f"获取财务数据失败: {e}")
-            return pd.DataFrame({'code': codes})
+            return pd.DataFrame({'code': codes, 'report_date': None})
 
     def get_index_data(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """获取指数数据"""
