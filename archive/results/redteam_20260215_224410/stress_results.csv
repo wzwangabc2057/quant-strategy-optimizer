@@ -1,0 +1,4 @@
+stress_factor,stress_name,gross_return,cost_ratio,cost_drag,net_return,turnover,avg_holding_days
+1.0,Stress0,33.43,10.0,3.343,31.758499999999994,2.5,100.8
+2.0,Stress1,33.43,20.0,6.686,30.086999999999996,2.5,100.8
+3.0,Stress2,33.43,30.000000000000004,10.029,28.415499999999998,2.5,100.8

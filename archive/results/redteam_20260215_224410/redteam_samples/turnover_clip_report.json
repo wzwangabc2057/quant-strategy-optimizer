@@ -1,0 +1,5 @@
+{
+  "capped": false,
+  "turnover": 0.2653834014298347,
+  "max_turnover": 0.3
+}

@@ -1,0 +1,4 @@
+version,R4_annual_return,R4_sharpe,R4_max_drawdown,R5_annual_return,R5_sharpe,R5_max_drawdown
+v4智能,33.43,2.65,-12.0,36.4,2.64,-10.7
+v3激进,13.42,0.78,-21.4,14.99,0.79,-25.4
+v2基础,12.94,0.75,-22.4,12.25,0.71,-24.4

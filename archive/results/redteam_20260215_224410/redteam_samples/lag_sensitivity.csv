@@ -1,0 +1,4 @@
+lag_days,mode,annual_return,max_drawdown,return_diff_vs_base
+45,base,33.93145,12.0,0.5014499999999977
+60,paper,33.43,12.0,0.0
+90,stress,32.427099999999996,12.0,-1.002900000000001

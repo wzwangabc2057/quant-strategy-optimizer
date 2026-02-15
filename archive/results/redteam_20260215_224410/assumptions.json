@@ -1,0 +1,18 @@
+{
+  "cost_model": {
+    "buy_commission": 0.00026,
+    "sell_commission": 0.00126,
+    "base_slippage": 0.001
+  },
+  "asof_delay_days": 60,
+  "lag_mode": "paper",
+  "participation_rate": 0.01,
+  "max_turnover": 0.3,
+  "industry_cap": 0.25,
+  "single_cap": 0.08,
+  "rebalance_frequency": "monthly",
+  "backtest_period": {
+    "start": "2020-01-01",
+    "end": "2024-12-31"
+  }
+}

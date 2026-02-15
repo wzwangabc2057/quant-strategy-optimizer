@@ -1,0 +1,98 @@
+{
+  "run_id": "redteam_20260215_224410",
+  "timestamp": "2026-02-15T22:44:10.710169",
+  "execution_config": {
+    "lag_days": 60,
+    "lag_mode": "paper",
+    "participation_rate": 0.01,
+    "max_turnover": 0.3,
+    "industry_cap": 0.25,
+    "single_cap": 0.08
+  },
+  "R4": {
+    "Stress0": {
+      "annual_return": 33.43,
+      "sharpe": 2.65,
+      "max_drawdown": -12.0
+    },
+    "Stress1": {
+      "annual_return": 28.42,
+      "sharpe": 2.25,
+      "max_drawdown": -13.5
+    },
+    "Stress2": {
+      "annual_return": 23.41,
+      "sharpe": 1.85,
+      "max_drawdown": -15.0
+    }
+  },
+  "R5": {
+    "Stress0": {
+      "annual_return": 36.4,
+      "sharpe": 2.64,
+      "max_drawdown": -10.7
+    },
+    "Stress1": {
+      "annual_return": 30.94,
+      "sharpe": 2.24,
+      "max_drawdown": -12.5
+    },
+    "Stress2": {
+      "annual_return": 25.48,
+      "sharpe": 1.84,
+      "max_drawdown": -14.5
+    }
+  },
+  "walk_forward": {
+    "n_windows": 12,
+    "return": {
+      "p25": 30.156695314951094,
+      "p50": 33.26180897196114,
+      "p75": 35.532230250364364,
+      "min": 20.85971302788046,
+      "max": 43.722138431333335,
+      "std": 6.1131983662778895
+    },
+    "drawdown": {
+      "p25": 9.812718725659682,
+      "p50": 12.520628224757266,
+      "p75": 17.124588603148656,
+      "max": 17.656320330745594
+    },
+    "sharpe": {
+      "p25": 1.7578176931976246,
+      "p50": 2.146154065053721,
+      "p75": 2.5729111603698493,
+      "min": 1.5696756190799965
+    },
+    "worst_window": {
+      "index": 7,
+      "period": "2020-08",
+      "return": 20.85971302788046,
+      "drawdown": 17.09320402078782
+    }
+  },
+  "turnover_annual": 2.5,
+  "avg_holding_days": 101,
+  "cost_ratio_stress0": 15.0,
+  "cost_ratio_stress1": 25.0,
+  "cost_ratio_stress2": 35.0,
+  "governance": {
+    "capacity_clip": {
+      "timestamp": "2026-02-15T22:44:10.709222",
+      "clipped": false,
+      "n_clipped": 0,
+      "total_clipped_amount": 0.0,
+      "clipped_stocks": [],
+      "participation_rate": 0.01
+    },
+    "industry_clip": {
+      "n_clips": 1
+    },
+    "turnover_cap": {
+      "capped": false,
+      "turnover": 0.2653834014298347,
+      "max_turnover": 0.3
+    }
+  }
+}
