@@ -6,5 +6,5 @@ from .risk_control import RiskController, RiskConfig, PositionTracker
 from .order_generator import OrderGenerator, OrderConfig, Order
 from .governance import (
     PortfolioGovernance, GovernanceConfig,
-    RiskBudgeting, PortfolioOptimizer, ComplianceChecker
+    RiskBudgeting, ComplianceChecker, create_governance_config
 )

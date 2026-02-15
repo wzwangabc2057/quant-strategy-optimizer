@@ -76,6 +76,72 @@ class DataFetcher:
             pass
         return pd.DataFrame()
 
+    def get_industry_classification(self, codes: List[str] = None) -> pd.DataFrame:
+        """
+        获取行业分类数据
+
+        Args:
+            codes: 股票代码列表，None则获取全部
+
+        Returns:
+            DataFrame with columns: [code, industry_name]
+        """
+        try:
+            if codes:
+                codes_str = "','".join(codes)
+                result = self.client.query(f"""
+                    SELECT DISTINCT stock_code as code, block_name as industry_name
+                    FROM stock_block_em
+                    WHERE block_type = 'industry'
+                      AND stock_code IN ('{codes_str}')
+                """)
+            else:
+                result = self.client.query("""
+                    SELECT DISTINCT stock_code as code, block_name as industry_name
+                    FROM stock_block_em
+                    WHERE block_type = 'industry'
+                """)
+
+            if result.result_rows:
+                return pd.DataFrame(result.result_rows, columns=['code', 'industry_name'])
+        except Exception as e:
+            print(f"获取行业分类失败: {e}")
+        return pd.DataFrame(columns=['code', 'industry_name'])
+
+    def get_stock_listing_date(self, codes: List[str] = None) -> pd.DataFrame:
+        """
+        获取股票上市日期（通过首次出现日期估算）
+
+        Args:
+            codes: 股票代码列表
+
+        Returns:
+            DataFrame with columns: [code, list_date]
+        """
+        try:
+            if codes:
+                codes_str = "','".join(codes)
+                result = self.client.query(f"""
+                    SELECT code, min(date) as list_date
+                    FROM stock_data_qfq
+                    WHERE code IN ('{codes_str}')
+                    GROUP BY code
+                """)
+            else:
+                result = self.client.query("""
+                    SELECT code, min(date) as list_date
+                    FROM stock_data_qfq
+                    GROUP BY code
+                """)
+
+            if result.result_rows:
+                df = pd.DataFrame(result.result_rows, columns=['code', 'list_date'])
+                df['list_date'] = pd.to_datetime(df['list_date'])
+                return df
+        except Exception as e:
+            print(f"获取上市日期失败: {e}")
+        return pd.DataFrame(columns=['code', 'list_date'])
+
     def load_portfolio(self, file_path: str = None) -> dict:
         """加载持仓文件"""
         file_path = file_path or PORTFOLIO_FILE
