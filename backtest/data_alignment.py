@@ -5,6 +5,7 @@
 1. asof_date机制 - 财务数据只能使用已披露的数据
 2. 反泄漏join - 确保signal_date < trade_date
 3. 幸存者偏差处理 - 使用历史时点可得的股票池
+4. 支持可配置的财务可用日延迟 (lag_days)
 ================================================================================
 """
 import pandas as pd
@@ -12,8 +13,28 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 import logging
+import json
+import os
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import FINANCIAL_LAG_PRESETS, DEFAULT_LAG_DAYS
 
 logger = logging.getLogger(__name__)
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """自定义JSON编码器"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Timestamp):
+            return str(obj)
+        return super().default(obj)
 
 
 class DataAlignment:
@@ -27,12 +48,36 @@ class DataAlignment:
         'annual': 120,  # 年报：4月30日前
     }
 
-    def __init__(self, default_delay_days: int = 45):
+    def __init__(self, lag_days: int = None, mode: str = 'paper'):
         """
         Args:
-            default_delay_days: 默认披露延迟天数
+            lag_days: 财务可用日延迟天数（覆盖mode）
+            mode: 模式 ('base'/'paper'/'stress')，使用预设值
         """
-        self.default_delay_days = default_delay_days
+        if lag_days is not None:
+            self.lag_days = lag_days
+        else:
+            self.lag_days = FINANCIAL_LAG_PRESETS.get(mode, DEFAULT_LAG_DAYS)
+
+        self.mode = mode
+        self.default_delay_days = self.lag_days
+
+        logger.info(f"DataAlignment 初始化: lag_days={self.lag_days}, mode={mode}")
+
+    def get_config(self) -> Dict:
+        """获取当前配置"""
+        return {
+            'lag_days': self.lag_days,
+            'mode': self.mode,
+            'presets': FINANCIAL_LAG_PRESETS,
+        }
+
+    def save_config(self, filepath: str):
+        """保存配置到文件"""
+        config = self.get_config()
+        with open(filepath, 'w') as f:
+            json.dump(config, f, indent=2, cls=NumpyEncoder)
+        logger.info(f"配置已保存: {filepath}")
 
     def get_asof_date(self, report_date: str, signal_date: str) -> Optional[str]:
         """
@@ -48,22 +93,18 @@ class DataAlignment:
         report_dt = pd.to_datetime(report_date)
         signal_dt = pd.to_datetime(signal_date)
 
-        # 判断报告类型
+        # 判断报告类型，使用可配置的延迟
         month = report_dt.month
         if month == 3:
-            deadline_days = self.DISCLOSURE_DEADLINES['Q1']
-            disclosure_deadline = report_dt + timedelta(days=deadline_days + 30)  # 4月30日
+            disclosure_deadline = report_dt + timedelta(days=self.lag_days + 30)
         elif month == 6:
-            deadline_days = self.DISCLOSURE_DEADLINES['H1']
-            disclosure_deadline = report_dt + timedelta(days=deadline_days + 62)  # 8月31日
+            disclosure_deadline = report_dt + timedelta(days=self.lag_days + 62)
         elif month == 9:
-            deadline_days = self.DISCLOSURE_DEADLINES['Q3']
-            disclosure_deadline = report_dt + timedelta(days=deadline_days + 31)  # 10月31日
+            disclosure_deadline = report_dt + timedelta(days=self.lag_days + 31)
         elif month == 12:
-            deadline_days = self.DISCLOSURE_DEADLINES['annual']
-            disclosure_deadline = report_dt + timedelta(days=deadline_days + 120)  # 4月30日
+            disclosure_deadline = report_dt + timedelta(days=self.lag_days + 120)
         else:
-            disclosure_deadline = report_dt + timedelta(days=self.default_delay_days)
+            disclosure_deadline = report_dt + timedelta(days=self.lag_days)
 
         # 检查信号日是否在披露截止日之后
         if signal_dt >= disclosure_deadline:
@@ -104,7 +145,7 @@ class DataAlignment:
             aligned_df = aligned_df.sort_values(date_col, ascending=False)
             aligned_df = aligned_df.drop_duplicates(subset=['code'], keep='first')
 
-        logger.info(f"财务数据对齐: 原始{len(financial_df)}条 -> 对齐后{len(aligned_df)}条")
+        logger.info(f"财务数据对齐 (lag={self.lag_days}天): 原始{len(financial_df)}条 -> 对齐后{len(aligned_df)}条")
 
         return aligned_df
 
