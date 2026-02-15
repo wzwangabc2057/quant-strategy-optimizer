@@ -181,3 +181,120 @@ def check_gate(results, gate_config):
 - [ ] 实际佣金费率是多少？
 - [ ] 预期资金规模是多少？（影响冲击成本）
 - [ ] 是否有涨跌停标记数据？
+
+---
+
+## 七、Gate v2 - 可运营验收门槛
+
+### 7.1 设计原则
+
+Gate v2 从"好看指标"升级为"可运营指标"：
+
+1. **分布门槛**：不只看单点，看P25/P50/P75分布
+2. **压力测试**：Stress1 (成本×2) 下的表现
+3. **换手控制**：限制过度交易
+4. **成本占比**：成本不能吃掉太多收益
+
+### 7.2 Gate v2 规则
+
+#### R4 稳健型
+
+| 指标 | 门槛 | 说明 |
+|------|------|------|
+| Stress1 P25 年化 | ≥18% | 成本×2下，P25收益仍达标 |
+| P75 最大回撤 | ≤20% | 75%的窗口回撤不超20% |
+| P50 夏普 | ≥1.0 | 中位数夏普达标 |
+| 年换手 | ≤300% | 或平均持仓≥20天 |
+| 成本占比 | ≤35% | 成本/毛收益 |
+
+#### R5 进取型
+
+| 指标 | 门槛 | 说明 |
+|------|------|------|
+| Stress1 P25 年化 | ≥20% | 成本×2下，P25收益仍达标 |
+| P75 最大回撤 | ≤25% | 75%的窗口回撤不超25% |
+| P50 夏普 | ≥1.0 | 中位数夏普达标 |
+| 年换手 | ≤500% | 或平均持仓≥10天 |
+| 成本占比 | ≤45% | 成本/毛收益 |
+
+### 7.3 压力测试定义
+
+| 压力等级 | 成本系数 | 说明 |
+|---------|---------|------|
+| Stress0 | ×1 | 正常成本 |
+| Stress1 | ×2 | 成本翻倍 |
+| Stress2 | ×3 | 成本三倍 |
+
+### 7.4 自动回退规则
+
+当 Gate v2 不通过时：
+
+```python
+if not gate_v2_passed:
+    fallback_version = 'v3'
+    print(f"🔴 Gate v2 未通过 - 自动回退到 {fallback_version}")
+    print("回退原因:")
+    for check in failed_checks:
+        print(f"  - {check}")
+```
+
+### 7.5 运行命令
+
+```bash
+# 运行 Gate v2 检查
+python run_all_v2.py --gate
+
+# 运行完整红队审计 + Gate v2
+python run_all_v2.py --redteam --gate
+
+# 运行所有测试
+python run_all_v2.py --all
+```
+
+---
+
+## 八、红队审计流程
+
+### 8.1 审计步骤
+
+1. **asof_date 抽样** (30股×10日)
+   - 检查财务数据时点泄漏
+   - 断言：asof_date ≤ signal_date
+
+2. **幸存者偏差**
+   - 标记潜在偏差
+   - 随机剔除10%测试
+   - 剔除Top5%贡献股测试
+
+3. **成本压力测试**
+   - Stress0/1/2 对比
+   - 计算成本占比
+
+4. **Walk-Forward 分布**
+   - 计算P25/P50/P75
+   - 定位最差窗口
+
+5. **约束影响评估**
+   - 四档约束对比
+   - 评估治理有效性
+
+6. **最差窗口复盘**
+   - 自动定位
+   - 导出复盘资产
+
+### 8.2 输出资产
+
+```
+results/<run_id>/
+├── metrics.json          # 所有KPI
+├── kpi_table.csv         # KPI表格
+├── positions.csv         # 持仓明细
+├── stress_results.csv    # 压力测试
+├── assumptions.json      # 假设参数
+└── redteam_samples/
+    ├── asof_samples.csv
+    ├── cost_stress.csv
+    ├── constraint_impact.csv
+    ├── worst_case_window.json
+    └── prod_acceptance_report.md
+```
