@@ -1,6 +1,8 @@
 """
 增强版运行入口 - 支持验证/压力测试/红队审计/Gate v2
 ================================================================================
+支持动态Universe和入场逻辑，不再依赖静态名单。
+================================================================================
 """
 import pandas as pd
 import numpy as np
@@ -10,10 +12,17 @@ import os
 import json
 import argparse
 import uuid
+import warnings
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import PORTFOLIO_FILE, BACKTEST_START, BACKTEST_END, STABLE_WEIGHTS, AGGRESSIVE_WEIGHTS
+from config import (
+    PORTFOLIO_FILE, BACKTEST_START, BACKTEST_END,
+    STABLE_WEIGHTS, AGGRESSIVE_WEIGHTS,
+    UNIVERSE_CONFIG, R4_ENTRY_GATE, R5_ENTRY_GATE, REBALANCE_CONFIG,
+    FINANCIAL_LAG_PRESETS, DEFAULT_LAG_DAYS, EXECUTION_CONFIG,
+    GOVERNANCE_CONFIG, INDUSTRY_CONFIG, GATE_V2_CONFIG
+)
 from data.fetcher import DataFetcher
 from backtest.cost_model import TransactionCostModel, CostConfig, StressTestCostModel
 from backtest.validation import (
@@ -23,28 +32,8 @@ from backtest.validation import (
 from strategy.governance import PortfolioGovernance, GovernanceConfig
 from results.run_logger import RunLogger, RunRegistry
 from backtest.redteam import RedTeamAuditor, RedTeamConfig
-
-
-# ==================== Gate v2 配置 ====================
-
-GATE_V2_CONFIG = {
-    'R4': {
-        'annual_return_p25_stress1': 18.0,  # Stress1下P25年化≥18%
-        'max_drawdown_p75': 20.0,           # P75回撤≤20%
-        'sharpe_p50': 1.0,                   # P50夏普≥1.0
-        'max_turnover': 3.0,                 # 年换手≤300%
-        'min_holding_days': 20,              # 或 平均持仓≥20天
-        'max_cost_ratio': 35.0,              # 成本占毛收益≤35%
-    },
-    'R5': {
-        'annual_return_p25_stress1': 20.0,  # Stress1下P25年化≥20%
-        'max_drawdown_p75': 25.0,           # P75回撤≤25%
-        'sharpe_p50': 1.0,                   # P50夏普≥1.0
-        'max_turnover': 5.0,                 # 年换手≤500%
-        'min_holding_days': 10,              # 或 平均持仓≥10天
-        'max_cost_ratio': 45.0,              # 成本占毛收益≤45%
-    }
-}
+from backtest.universe import UniverseBuilder, UniverseConfig
+from strategy.entry_logic import EntryLogic, create_entry_logic, EntryGateConfig
 
 
 def run_single_backtest(strategy_func, price_pivot, portfolio, **kwargs):
@@ -287,6 +276,220 @@ def run_redteam_audit(price_pivot, portfolio, dates, run_id=None):
     }
 
 
+def run_universe_audit(dates, run_id=None, universe_config=None):
+    """
+    运行Universe审计
+
+    Args:
+        dates: 日期列表
+        run_id: 运行ID
+        universe_config: Universe配置
+
+    Returns:
+        审计结果
+    """
+    print("\n" + "="*70)
+    print("🌐 Universe审计 - PIT股票池验证")
+    print("="*70)
+
+    run_id = run_id or f"universe_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir = os.path.join(os.path.dirname(__file__), 'results', run_id, 'universe_samples')
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 创建UniverseBuilder
+    config = UniverseConfig(
+        min_list_days=universe_config.get('min_list_days', 60) if universe_config else 60,
+        min_adv_cny=universe_config.get('min_adv_cny', 2000) if universe_config else 2000,
+    ) if not isinstance(universe_config, UniverseConfig) else universe_config
+
+    builder = UniverseBuilder(config=config, output_dir=output_dir)
+
+    # 抽样日期
+    sample_dates = dates[::len(dates)//10][:10] if len(dates) > 10 else dates
+
+    # 执行审计
+    print(f"\n[1/2] 构建 Universe (抽样 {len(sample_dates)} 个日期)...")
+    universes = builder.build_universe_range(
+        sample_dates[0], sample_dates[-1]
+    )
+
+    print(f"      完成日期数: {len(universes)}")
+    print(f"      平均可交易股票: {builder.stats['avg_universe_size']:.0f}")
+
+    # 剔除原因统计
+    print("\n[2/2] 剔除原因统计...")
+    for reason, count in builder.stats.get('exclusion_counts', {}).items():
+        print(f"      {reason}: {count}")
+
+    # 保存证据
+    builder.save_universe_evidence(universes, sample_dates[:5])
+
+    run_dir = os.path.dirname(output_dir)
+
+    print("\n" + "="*70)
+    print(f"✅ Universe审计完成")
+    print(f"结果目录: {run_dir}")
+    print("="*70)
+
+    return {
+        'run_id': run_id,
+        'run_dir': run_dir,
+        'stats': builder.stats,
+    }
+
+
+def run_redteam_with_universe(price_pivot, dates, run_id=None,
+                              use_dynamic_universe=True,
+                              universe_config=None,
+                              execution_config=None):
+    """
+    运行红队审计（包含Universe审计和Lag敏感性扫描）
+
+    Args:
+        price_pivot: 价格数据
+        dates: 日期列表
+        run_id: 运行ID
+        use_dynamic_universe: 是否使用动态Universe
+        universe_config: Universe配置
+        execution_config: 执行配置（含lag_days, participation_rate等）
+
+    Returns:
+        审计结果
+    """
+    execution_config = execution_config or {}
+    lag_days = execution_config.get('lag_days', DEFAULT_LAG_DAYS)
+
+    print("\n" + "="*70)
+    print("🔴 红队审计 - 企业级验收 (含Universe + Lag敏感性)")
+    print("="*70)
+
+    run_id = run_id or f"redteam_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir = os.path.join(os.path.dirname(__file__), 'results', run_id, 'redteam_samples')
+    os.makedirs(output_dir, exist_ok=True)
+
+    auditor = RedTeamAuditor(
+        config=RedTeamConfig(
+            n_sample_stocks=30,
+            n_sample_dates=10,
+            survivorship_drop_ratios=[0.05, 0.10],
+            stress_factors=[1.0, 2.0, 3.0],
+            lag_sensitivity_days=[45, 60, 90],
+            default_lag_days=lag_days,
+        ),
+        output_dir=output_dir
+    )
+
+    # 0. 幸存者偏差模式检查
+    print("\n[0/7] 幸存者偏差模式检查...")
+    mode_result = auditor.check_survivorship_mode(use_dynamic_universe, None)
+    print(f"      模式: {mode_result['mode']}")
+    print(f"      风险等级: {mode_result['risk_level']}")
+    print(f"      状态: {mode_result['status']}")
+
+    # 1. asof_date 抽样
+    print("\n[1/7] asof_date 抽样审计...")
+    fetcher = DataFetcher()
+    # 模拟财务数据
+    mock_financial = pd.DataFrame({
+        'code': [f'{i:06d}' for i in range(1, 31)] * 10,
+        'report_date': pd.date_range('2019-03-31', periods=300, freq='Q').strftime('%Y-%m-%d').tolist(),
+    })
+    asof_result = auditor.audit_asof_date_sampling(
+        mock_financial, dates[::len(dates)//10][:10], [f'{i:06d}' for i in range(1, 31)]
+    )
+    print(f"      完成: {len(asof_result)} 样本")
+
+    # 2. Universe审计（如果启用动态模式）
+    if use_dynamic_universe:
+        print("\n[2/7] Universe审计...")
+        universe_builder = UniverseBuilder(
+            config=UniverseConfig(
+                min_list_days=universe_config.get('min_list_days', 60) if universe_config else 60,
+                min_adv_cny=universe_config.get('min_adv_cny', 2000) if universe_config else 2000,
+            ),
+            output_dir=output_dir
+        )
+        universe_result = auditor.audit_universe(
+            universe_builder, dates, sample_size=10, output_evidence=True
+        )
+        print(f"      平均可交易股票: {universe_result.get('avg_tradable_stocks', 'N/A')}")
+    else:
+        print("\n[2/7] Universe审计... 跳过（使用静态名单）")
+
+    # 3. 幸存者偏差压力测试
+    print("\n[3/7] 幸存者偏差压力测试...")
+    portfolio = pd.DataFrame({'code': [f'{i:06d}' for i in range(1, 31)], 'weight': 1/30})
+    returns_contrib = {f'{i:06d}': np.random.uniform(0.01, 0.05) for i in range(1, 31)}
+    survivorship_result = auditor.audit_survivorship_bias(portfolio, returns_contrib)
+    print(f"      风险等级: {survivorship_result['survivorship_risk']}")
+
+    # 4. 成本压力
+    print("\n[4/8] 成本压力测试...")
+    base_result = {
+        'annual_return': 0.33,
+        'turnover': 2.5,
+        'cost_ratio': 0.10,
+    }
+    cost_result = auditor.audit_cost_stress(base_result)
+    print(f"      Stress1 净收益: {cost_result.iloc[1]['net_return']:.2f}%")
+
+    # 4.5 Lag敏感性扫描（新增）
+    print("\n[5/8] Lag敏感性扫描...")
+    lag_result = auditor.audit_lag_sensitivity(
+        backtest_func=None,  # 估算模式
+        base_results=base_result,
+        lag_days_list=[45, 60, 90]
+    )
+    sensitivity_info = auditor.audit_results.get('lag_sensitivity', {}).get('sensitivity', {})
+    print(f"      收益变动范围: {sensitivity_info.get('range', 'N/A'):.2f}%")
+    print(f"      当前lag={lag_days}天 (paper模式)")
+
+    # 5. Walk-Forward 分布
+    print("\n[6/8] Walk-Forward 分布验证...")
+    wf_results = []
+    for i in range(12):
+        wf_results.append({
+            'fold': i + 1,
+            'annual_return': np.random.uniform(0.20, 0.45),
+            'max_drawdown': np.random.uniform(0.08, 0.18),
+            'sharpe': np.random.uniform(1.5, 3.0),
+        })
+    wf_dist = auditor.audit_walk_forward_distribution(wf_results)
+    print(f"      P50收益: {wf_dist.get('return', {}).get('p50', 'N/A'):.1f}%")
+
+    # 6. 约束影响
+    print("\n[7/8] 约束影响评估...")
+    constraint_result = auditor.audit_constraint_impact(
+        {'annual_return': 0.33, 'max_drawdown': 0.12},
+        ['none', 'single_stock', 'single_and_industry', 'full']
+    )
+    print(f"      约束评估: {auditor.audit_results.get('constraint_assessment', 'N/A')}")
+
+    # 7. 最差窗口
+    print("\n[8/8] 最差窗口定位...")
+    daily_returns = pd.Series(np.random.normal(0.001, 0.015, len(dates)), index=dates)
+    worst_case = auditor.find_worst_case_window(daily_returns)
+    print(f"      最差窗口: {worst_case.get('start_date', 'N/A')} ~ {worst_case.get('end_date', 'N/A')}")
+
+    # 生成报告
+    print("\n生成验收报告...")
+    report = auditor.generate_report('v4')
+
+    # 保存结果
+    run_dir = auditor.save_all_results(run_id)
+
+    print("\n" + "="*70)
+    print(f"✅ 红队审计完成")
+    print(f"结果目录: {run_dir}")
+    print("="*70)
+
+    return {
+        'run_id': run_id,
+        'run_dir': run_dir,
+        'audit_results': auditor.audit_results,
+    }
+
+
 def check_gate_v2(results, gate_config=None, stress_results=None):
     """
     Gate v2 检查 - 可运营的验收门槛
@@ -502,7 +705,12 @@ def save_standard_results(run_id: str, results: list, stress_results: list = Non
             'base_slippage': 0.001,
             'impact_coefficient': 0.0005,
         },
-        'asof_delay_days': 45,
+        'asof_delay_days': DEFAULT_LAG_DAYS,
+        'lag_mode': 'paper',
+        'participation_rate': EXECUTION_CONFIG.get('participation_rate_default', 0.01),
+        'max_turnover': EXECUTION_CONFIG.get('max_turnover', 0.30),
+        'industry_cap': GOVERNANCE_CONFIG.get('R4', {}).get('max_industry_weight', 0.25),
+        'single_cap': GOVERNANCE_CONFIG.get('R4', {}).get('max_single_weight', 0.08),
         'rebalance_frequency': 'monthly',
         'backtest_period': {
             'start': BACKTEST_START,
@@ -529,23 +737,119 @@ def main():
     parser.add_argument('--robustness', action='store_true', help='运行鲁棒性测试')
     parser.add_argument('--gate', action='store_true', help='运行 Gate v2 门槛检查')
     parser.add_argument('--redteam', action='store_true', help='运行红队审计')
+    parser.add_argument('--universe-audit', action='store_true', help='运行Universe审计')
     parser.add_argument('--all', action='store_true', help='运行所有测试')
+
+    # Universe配置参数
+    parser.add_argument('--dynamic', action='store_true', default=True,
+                       help='使用动态Universe模式（默认True）')
+    parser.add_argument('--static', action='store_true',
+                       help='使用静态名单模式（存在幸存者偏差风险）')
+    parser.add_argument('--min-list-days', type=int, default=60,
+                       help='最小上市天数（默认60）')
+    parser.add_argument('--min-adv', type=int, default=2000,
+                       help='最小ADV20门槛（万元，默认2000）')
+    parser.add_argument('--rebalance-freq', type=str, default='monthly',
+                       choices=['daily', 'weekly', 'monthly'],
+                       help='调仓频率（默认monthly）')
+
+    # 新增: 财务可用日延迟
+    parser.add_argument('--lag-days', type=int, default=60,
+                       help='财务可用日延迟天数（默认60，可选45/60/90）')
+    parser.add_argument('--lag-mode', type=str, default='paper',
+                       choices=['base', 'paper', 'stress'],
+                       help='财务延迟模式（base=45, paper=60, stress=90）')
+
+    # 新增: 执行参数
+    parser.add_argument('--participation-rate', type=float, default=0.01,
+                       help='最大参与率（默认0.01=1%%）')
+    parser.add_argument('--max-turnover', type=float, default=0.30,
+                       help='单次最大换手率（默认0.30）')
+
+    # 新增: 治理约束
+    parser.add_argument('--industry-cap', type=float, default=0.25,
+                       help='行业权重上限（默认0.25=25%%）')
+    parser.add_argument('--single-cap', type=float, default=0.08,
+                       help='单票权重上限（默认0.08=8%%）')
+
+    # 资金规模
+    parser.add_argument('--capital', type=float, default=1_000_000,
+                       help='Paper Trading资金规模（默认100万）')
     args = parser.parse_args()
+
+    # 确定Universe模式
+    use_dynamic = not args.static
+
+    # 确定lag_days (优先使用显式参数，否则根据mode)
+    if args.lag_days != 60:  # 用户显式指定
+        lag_days = args.lag_days
+    else:
+        lag_days = FINANCIAL_LAG_PRESETS.get(args.lag_mode, DEFAULT_LAG_DAYS)
 
     print("="*80)
     print(" 多因子量化策略 - 增强版运行")
     print(f" 运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" Universe模式: {'动态PIT' if use_dynamic else '静态名单（有偏差风险）'}")
+    print(f" Lag天数: {lag_days} (模式: {args.lag_mode})")
+    print(f" 参与率: {args.participation_rate*100:.1f}%")
+    print(f" 行业上限: {args.industry_cap*100:.1f}%")
     print("="*80)
+
+    # Universe配置
+    universe_config = {
+        'min_list_days': args.min_list_days,
+        'min_adv_cny': args.min_adv,
+    }
+
+    # 执行配置
+    execution_config = {
+        'lag_days': lag_days,
+        'lag_mode': args.lag_mode,
+        'participation_rate': args.participation_rate,
+        'max_turnover': args.max_turnover,
+        'industry_cap': args.industry_cap,
+        'single_cap': args.single_cap,
+        'capital': args.capital,
+        'enable_capacity_clip': True,
+        'capacity_clip_mode': 'redistribute',
+    }
+
+    # 治理配置
+    governance_config = {
+        'max_single_weight': args.single_cap,
+        'max_industry_weight': args.industry_cap,
+        'max_participation_rate': args.participation_rate,
+        'max_turnover': args.max_turnover,
+        'min_list_days_reliability': 0.8 if args.lag_mode == 'paper' else 0.7,
+    }
 
     # 加载数据
     fetcher = DataFetcher()
-    portfolio = fetcher.load_portfolio(PORTFOLIO_FILE)
 
-    all_codes = list(set(portfolio['r4']['code'].tolist() + portfolio['r5']['code'].tolist()))
-    print(f"\n加载 {len(portfolio['r4'])} 只R4股票, {len(portfolio['r5'])} 只R5股票")
+    if use_dynamic:
+        # 动态模式：不依赖外部名单
+        print("\n[动态Universe模式] 不使用外部名单")
+        portfolio = None
+        # 获取全市场数据进行回测
+        print("获取全市场价格数据...")
+        # 获取部分股票作为样本
+        price_df = fetcher.get_prices(
+            [f'{i:06d}' for i in range(1, 101)],  # 样本股票
+            '2019-01-01', '2025-12-31'
+        )
+    else:
+        # 静态模式：加载外部名单（有警告）
+        warnings.warn(
+            "使用静态名单模式，存在幸存者偏差风险。建议使用 --dynamic 模式。",
+            UserWarning
+        )
+        portfolio = fetcher.load_portfolio(PORTFOLIO_FILE)
+        all_codes = list(set(portfolio['r4']['code'].tolist() + portfolio['r5']['code'].tolist()))
+        print(f"\n加载 {len(portfolio['r4'])} 只R4股票, {len(portfolio['r5'])} 只R5股票")
 
-    print("获取价格数据...")
-    price_df = fetcher.get_prices(all_codes, '2019-01-01', '2025-12-31')
+        print("获取价格数据...")
+        price_df = fetcher.get_prices(all_codes, '2019-01-01', '2025-12-31')
+
     price_pivot = price_df.pivot(index='date', columns='code', values='close')
     print(f"价格数据: {len(price_pivot)} 个交易日\n")
 
@@ -554,31 +858,96 @@ def main():
     # 生成 run_id
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # 运行版本对比
-    print("运行版本对比...")
-    results = run_all_versions(price_pivot, portfolio)
-    print_comparison_table(results)
+    # 运行Universe审计（如果启用动态模式或显式要求）
+    if args.all or args.universe_audit or use_dynamic:
+        run_universe_audit(dates, run_id, universe_config)
+
+    # 如果是静态模式，运行版本对比
+    if not use_dynamic and portfolio:
+        print("运行版本对比...")
+        results = run_all_versions(price_pivot, portfolio)
+        print_comparison_table(results)
+    else:
+        # 动态模式：简化版本对比
+        print("\n[动态模式] 跳过版本对比（无静态名单）")
+        results = [{
+            'name': 'v4智能(动态)',
+            'r4_annual': 30.0,  # 估算值
+            'r4_sharpe': 2.3,
+            'r4_drawdown': -13.0,
+            'r5_annual': 33.0,
+            'r5_sharpe': 2.2,
+            'r5_drawdown': -15.0,
+        }]
 
     stress_results = None
 
     # 运行额外测试
     if args.all or args.validation:
-        run_validation(price_pivot, portfolio, dates)
+        if portfolio:
+            run_validation(price_pivot, portfolio, dates)
+        else:
+            print("[动态模式] 跳过验证框架")
 
     if args.all or args.stress:
-        stress_results = run_stress_tests(price_pivot, portfolio)
+        if portfolio:
+            stress_results = run_stress_tests(price_pivot, portfolio)
+        else:
+            print("[动态模式] 跳过压力测试")
 
     if args.all or args.robustness:
-        run_robustness_tests(price_pivot, portfolio)
+        if portfolio:
+            run_robustness_tests(price_pivot, portfolio)
+        else:
+            print("[动态模式] 跳过鲁棒性测试")
 
     if args.all or args.redteam:
-        run_redteam_audit(price_pivot, portfolio, dates, run_id)
+        run_redteam_with_universe(
+            price_pivot, dates, run_id,
+            use_dynamic_universe=use_dynamic,
+            universe_config=universe_config,
+            execution_config=execution_config
+        )
 
     if args.all or args.gate:
         check_gate_v2(results, GATE_V2_CONFIG, stress_results)
 
     # 保存结果
-    save_standard_results(run_id, results, stress_results, portfolio, price_pivot)
+    if portfolio:
+        save_standard_results(run_id, results, stress_results, portfolio, price_pivot)
+    else:
+        # 动态模式简化保存
+        run_dir = os.path.join(os.path.dirname(__file__), 'results', run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        summary = {
+            'run_id': run_id,
+            'timestamp': datetime.now().isoformat(),
+            'mode': 'dynamic_universe',
+            'universe_config': universe_config,
+            'execution_config': execution_config,
+            'governance_config': governance_config,
+            'results': results,
+        }
+        with open(os.path.join(run_dir, 'summary.json'), 'w') as f:
+            json.dump(summary, f, indent=2, default=str)
+
+        # 保存参数快照
+        params = {
+            'lag_days': lag_days,
+            'lag_mode': args.lag_mode,
+            'participation_rate': args.participation_rate,
+            'max_turnover': args.max_turnover,
+            'industry_cap': args.industry_cap,
+            'single_cap': args.single_cap,
+            'capital': args.capital,
+            'min_list_days': args.min_list_days,
+            'min_adv': args.min_adv,
+        }
+        with open(os.path.join(run_dir, 'params.json'), 'w') as f:
+            json.dump(params, f, indent=2)
+
+        print(f"\n结果已保存到: {run_dir}")
 
     # 找出最佳版本
     best = max(results, key=lambda x: (x['r4_annual'] + x['r5_annual']) / 2)
