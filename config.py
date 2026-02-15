@@ -4,7 +4,7 @@
 import os
 
 # ClickHouse配置
-CLICKHOUSE_HOST = '127.0.0.1'
+CLICKHOUSE_HOST = '192.168.0.74'
 CLICKHOUSE_PORT = 8123
 
 # 回测配置

@@ -18,7 +18,13 @@ class DataFetcher:
     def __init__(self, host: str = None, port: int = None):
         self.host = host or CLICKHOUSE_HOST
         self.port = port or CLICKHOUSE_PORT
-        self.client = clickhouse_connect.get_client(host=self.host, port=self.port)
+        # Use compress=False to avoid zstd issues
+        self.client = clickhouse_connect.get_client(
+            host=self.host,
+            port=self.port,
+            compress=False,
+            query_limit=0
+        )
 
     def get_prices(self, codes: List[str], start_date: str, end_date: str) -> pd.DataFrame:
         """获取复权价格数据"""
