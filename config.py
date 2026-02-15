@@ -3,7 +3,15 @@
 """
 import os
 
-# ClickHouse配置
+# ==================== 数据源配置 ====================
+# 数据源选择: 'mcp' (推荐) 或 'clickhouse'
+DATA_SOURCE = os.environ.get('DATA_SOURCE', 'mcp')
+
+# MCP 服务配置 (推荐)
+MCP_URL = os.environ.get('MCP_URL', 'http://156.254.5.155:8092/mcp')
+MCP_TOKEN = os.environ.get('MCP_TOKEN', 'lhjy.653653a5ac6d4f348932d3365abcdeca')
+
+# ClickHouse配置 (备选)
 CLICKHOUSE_HOST = '192.168.0.74'
 CLICKHOUSE_PORT = 8123
 

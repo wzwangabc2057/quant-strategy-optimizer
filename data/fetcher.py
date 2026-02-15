@@ -1,9 +1,9 @@
 """
 数据获取模块
+支持 MCP 服务 (推荐) 和 ClickHouse (备选)
 """
 import pandas as pd
 import numpy as np
-import clickhouse_connect
 from typing import List, Optional
 import sys
 import os
@@ -11,23 +11,51 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import CLICKHOUSE_HOST, CLICKHOUSE_PORT, PORTFOLIO_FILE
 
+# 数据源选择
+DATA_SOURCE = os.environ.get('DATA_SOURCE', 'mcp')  # 'mcp' or 'clickhouse'
 
-class DataFetcher:
-    """数据获取器"""
+
+def get_fetcher(source: str = None):
+    """
+    获取数据获取器
+
+    Args:
+        source: 数据源 ('mcp' 或 'clickhouse')
+
+    Returns:
+        DataFetcher 实例
+    """
+    source = source or DATA_SOURCE
+
+    if source == 'mcp':
+        from data.fetcher_mcp import MCPDataFetcher
+        return MCPDataFetcher()
+    else:
+        return _ClickHouseDataFetcher()
+
+
+class _ClickHouseDataFetcher:
+    """ClickHouse 数据获取器 (备选)"""
 
     def __init__(self, host: str = None, port: int = None):
         self.host = host or CLICKHOUSE_HOST
         self.port = port or CLICKHOUSE_PORT
-        # Use compress=False to avoid zstd issues
-        self.client = clickhouse_connect.get_client(
-            host=self.host,
-            port=self.port,
-            compress=False,
-            query_limit=0
-        )
+        try:
+            import clickhouse_connect
+            self.client = clickhouse_connect.get_client(
+                host=self.host,
+                port=self.port,
+                compress=False,
+                query_limit=0
+            )
+        except Exception as e:
+            print(f"ClickHouse 连接失败: {e}")
+            self.client = None
 
     def get_prices(self, codes: List[str], start_date: str, end_date: str) -> pd.DataFrame:
         """获取复权价格数据"""
+        if self.client is None:
+            return pd.DataFrame(columns=['date', 'code', 'close', 'volume'])
         codes_str = "','".join(codes)
         result = self.client.query(f"""
             SELECT toString(date) as date, code, close, vol
@@ -43,6 +71,8 @@ class DataFetcher:
 
     def get_financial_data(self, codes: List[str]) -> pd.DataFrame:
         """获取财务数据"""
+        if self.client is None:
+            return pd.DataFrame({'code': codes, 'report_date': None})
         codes_str = "','".join(codes)
         try:
             result = self.client.query(f"""
@@ -61,6 +91,8 @@ class DataFetcher:
 
     def get_index_data(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """获取指数数据"""
+        if self.client is None:
+            return pd.DataFrame()
         try:
             result = self.client.query(f"""
                 SELECT toString(date) as date, close
@@ -77,15 +109,9 @@ class DataFetcher:
         return pd.DataFrame()
 
     def get_industry_classification(self, codes: List[str] = None) -> pd.DataFrame:
-        """
-        获取行业分类数据
-
-        Args:
-            codes: 股票代码列表，None则获取全部
-
-        Returns:
-            DataFrame with columns: [code, industry_name]
-        """
+        """获取行业分类数据"""
+        if self.client is None:
+            return pd.DataFrame(columns=['code', 'industry_name'])
         try:
             if codes:
                 codes_str = "','".join(codes)
@@ -109,15 +135,9 @@ class DataFetcher:
         return pd.DataFrame(columns=['code', 'industry_name'])
 
     def get_stock_listing_date(self, codes: List[str] = None) -> pd.DataFrame:
-        """
-        获取股票上市日期（通过首次出现日期估算）
-
-        Args:
-            codes: 股票代码列表
-
-        Returns:
-            DataFrame with columns: [code, list_date]
-        """
+        """获取股票上市日期"""
+        if self.client is None:
+            return pd.DataFrame(columns=['code', 'list_date'])
         try:
             if codes:
                 codes_str = "','".join(codes)
@@ -153,11 +173,18 @@ class DataFetcher:
         r4['code'] = r4['code'].apply(lambda x: str(x).split('.')[0])
         r5['code'] = r5['code'].apply(lambda x: str(x).split('.')[0])
 
-        # 归一化权重
         r4['weight'] = r4['weight'] / r4['weight'].sum()
         r5['weight'] = r5['weight'] / r5['weight'].sum()
 
         return {'r4': r4, 'r5': r5}
+
+
+# 默认使用 MCP 数据源
+class DataFetcher:
+    """数据获取器 - 默认使用 MCP"""
+
+    def __new__(cls):
+        return get_fetcher('mcp')
 
 
 def get_price_pivot(price_df: pd.DataFrame) -> pd.DataFrame:
