@@ -29,3 +29,12 @@ results/*.xlsx
 # Local config
 local_config.py
 .env
+
+# Results directories
+results/redteam_*/
+results/run_*/
+results/test_*/
+
+# Temp files
+=== Exit Code: ===
+echo
