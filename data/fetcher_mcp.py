@@ -305,6 +305,213 @@ class MCPDataFetcher:
 
         return pd.DataFrame(records)
 
+    def get_bulk_prices(self, trade_dates: List[str]) -> pd.DataFrame:
+        """
+        批量获取多个交易日全市场价格（按日期查询，非逐只股票）
+
+        Args:
+            trade_dates: 交易日期列表 (YYYYMMDD 格式)
+
+        Returns:
+            DataFrame with columns: [date, code, close, volume]
+        """
+        all_records = []
+
+        for trade_date in trade_dates:
+            # 分页获取（全市场约 5400+ 只，page_size=5000 需要 2 页）
+            for page in range(1, 3):
+                quotes = self.client.get_daily_quotes_by_date(
+                    trade_date=trade_date, page=page, page_size=5000
+                )
+                if not quotes:
+                    break
+
+                for q in quotes:
+                    ts_code = q.get('tsCode', '')
+                    if not ts_code:
+                        continue
+                    code = self._strip_code(ts_code)
+                    if not code[:1].isdigit():
+                        continue
+                    trade_dt = q.get('tradeDate', '')
+                    if '-' in trade_dt:
+                        trade_dt = trade_dt.replace('-', '')
+
+                    all_records.append({
+                        'date': trade_dt,
+                        'code': code,
+                        'close': float(q.get('close', 0) or 0),
+                        'volume': float(q.get('vol', 0) or 0),
+                    })
+
+                if len(quotes) < 5000:
+                    break  # 最后一页不满说明没有下一页了
+
+        if not all_records:
+            return pd.DataFrame(columns=['date', 'code', 'close', 'volume'])
+
+        df = pd.DataFrame(all_records)
+        df = df.drop_duplicates(subset=['date', 'code'], keep='last')
+        df = df.sort_values(['date', 'code']).reset_index(drop=True)
+        return df
+
+    def get_bulk_daily_basic(self, trade_date: str) -> pd.DataFrame:
+        """
+        批量获取某日全市场基本面指标
+
+        Args:
+            trade_date: 交易日期 (YYYY-MM-DD 或 YYYYMMDD)
+
+        Returns:
+            DataFrame with columns: [code, pe, pb, total_mv, circ_mv, turnover_rate, dv_ratio, ...]
+        """
+        trade_dt = trade_date.replace('-', '')
+        records = []
+
+        # 分页获取（全市场约 5400+ 只）
+        for page in range(1, 3):
+            basics = self.client.get_daily_basic_by_date(
+                trade_date=trade_dt, page=page, page_size=5000
+            )
+            if not basics:
+                break
+
+            for b in basics:
+                ts_code = b.get('tsCode', '')
+                if not ts_code:
+                    continue
+                code = self._strip_code(ts_code)
+                if not code[:1].isdigit():
+                    continue
+
+                records.append({
+                    'code': code,
+                    'trade_date': b.get('tradeDate', ''),
+                    'close': float(b.get('close', 0) or 0),
+                    'pe': float(b.get('pe', 0) or 0),
+                    'pe_ttm': float(b.get('peTtm', 0) or 0),
+                    'pb': float(b.get('pb', 0) or 0),
+                    'ps': float(b.get('ps', 0) or 0),
+                    'total_mv': float(b.get('totalMv', 0) or 0),
+                    'circ_mv': float(b.get('circMv', 0) or 0),
+                    'turnover_rate': float(b.get('turnoverRate', 0) or 0),
+                    'volume_ratio': float(b.get('volumeRatio', 0) or 0),
+                    'dv_ratio': float(b.get('dvRatio', 0) or 0),
+                })
+
+            if len(basics) < 5000:
+                break
+
+        if not records:
+            return pd.DataFrame()
+        return pd.DataFrame(records)
+
+    def get_recent_trade_dates(self, n_days: int = 120) -> List[str]:
+        """
+        获取最近 N 个交易日列表
+
+        优先从 ClickHouse (192.168.0.74) stock_index 表查上证指数提取交易日，
+        ClickHouse 不可用时 fallback 到 MCP 查个股日线。
+
+        Args:
+            n_days: 需要的交易日数量
+
+        Returns:
+            交易日列表 (YYYYMMDD 格式，从旧到新)
+        """
+        start_dt = (datetime.now() - timedelta(days=int(n_days * 1.8))).strftime('%Y-%m-%d')
+        end_dt = datetime.now().strftime('%Y-%m-%d')
+
+        # 优先: ClickHouse 查上证指数
+        try:
+            import clickhouse_connect
+            from config import CLICKHOUSE_HOST, CLICKHOUSE_PORT
+            ch = clickhouse_connect.get_client(
+                host=CLICKHOUSE_HOST, port=CLICKHOUSE_PORT,
+                compress=False, query_limit=0
+            )
+            result = ch.query(f"""
+                SELECT DISTINCT toString(date) as trade_date
+                FROM stock_index
+                WHERE code = '000001'
+                  AND date >= '{start_dt}'
+                  AND date <= '{end_dt}'
+                ORDER BY trade_date
+            """)
+            if result.result_rows:
+                dates = [row[0].replace('-', '') for row in result.result_rows]
+                print(f"ClickHouse 获取交易日: {len(dates)} 天")
+                return dates[-n_days:] if len(dates) >= n_days else dates
+        except Exception as e:
+            print(f"ClickHouse 获取交易日失败，fallback 到 MCP: {e}")
+
+        # Fallback: MCP 查个股日线
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=int(n_days * 1.8))).strftime('%Y%m%d')
+
+        quotes = self.client.get_daily_quotes(
+            ts_code='000001.SZ',
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        dates = set()
+        for q in quotes:
+            trade_date = q.get('tradeDate', '')
+            if trade_date:
+                if '-' in trade_date:
+                    trade_date = trade_date.replace('-', '')
+                dates.add(trade_date)
+
+        sorted_dates = sorted(dates)
+        return sorted_dates[-n_days:] if len(sorted_dates) >= n_days else sorted_dates
+
+    def get_income_growth(self, codes: List[str]) -> pd.DataFrame:
+        """
+        获取利润增长数据（拉取最新两期利润表计算 YoY）
+
+        Args:
+            codes: 股票代码列表
+
+        Returns:
+            DataFrame with columns: [code, revenue_growth, profit_growth]
+        """
+        records = []
+
+        for code in codes:
+            ts_code = self._convert_code(code)
+            try:
+                income_data = self.client.get_income_data(ts_code=ts_code, page_size=4)
+                if len(income_data) >= 2:
+                    # 按报告期排序，取最新两期
+                    sorted_data = sorted(income_data, key=lambda x: x.get('endDate', ''), reverse=True)
+                    latest = sorted_data[0]
+                    prev = sorted_data[1]
+
+                    # 计算营收增长
+                    rev_latest = float(latest.get('revenue', 0) or 0)
+                    rev_prev = float(prev.get('revenue', 0) or 0)
+                    revenue_growth = ((rev_latest / rev_prev) - 1) * 100 if rev_prev > 0 else 0
+
+                    # 计算利润增长
+                    profit_latest = float(latest.get('nIncome', 0) or latest.get('netProfit', 0) or 0)
+                    profit_prev = float(prev.get('nIncome', 0) or prev.get('netProfit', 0) or 0)
+                    profit_growth = ((profit_latest / profit_prev) - 1) * 100 if profit_prev > 0 else 0
+
+                    records.append({
+                        'code': code,
+                        'revenue_growth': revenue_growth,
+                        'profit_growth': profit_growth,
+                    })
+                else:
+                    records.append({'code': code, 'revenue_growth': 0, 'profit_growth': 0})
+            except Exception:
+                records.append({'code': code, 'revenue_growth': 0, 'profit_growth': 0})
+
+        if not records:
+            return pd.DataFrame(columns=['code', 'revenue_growth', 'profit_growth'])
+        return pd.DataFrame(records)
+
     def load_portfolio(self, file_path: str) -> dict:
         """加载持仓文件"""
         r4 = pd.read_excel(file_path, sheet_name='稳健型股票组合(风险等级R4)')

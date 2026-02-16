@@ -1,6 +1,7 @@
 """
 量化策略 API 服务
 提供持仓推荐、买入权重等接口
+使用 MCP 服务进行全市场选股
 """
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,10 +17,13 @@ import sys
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 导入新的选股器
+from api.stock_selector import StockSelector
+
 app = FastAPI(
     title="量化策略 API",
-    description="多因子量化策略 - 持仓推荐与买入权重接口",
-    version="1.0.0"
+    description="多因子量化策略 - 全市场选股与持仓推荐",
+    version="2.0.0"
 )
 
 # CORS 配置
@@ -89,7 +93,7 @@ class SignalResponse(BaseModel):
 
 # ==================== 策略引擎 ====================
 class StrategyEngine:
-    """策略引擎"""
+    """策略引擎 - 使用全市场选股器"""
 
     # 冻结参数
     FROZEN_PARAMS = {
@@ -122,73 +126,23 @@ class StrategyEngine:
     }
 
     def __init__(self):
-        self.data_fetcher = None
-        self._init_data_fetcher()
+        self.selector = None
+        self._init_selector()
 
-    def _init_data_fetcher(self):
-        """初始化数据获取器"""
+    def _init_selector(self):
+        """初始化全市场选股器"""
         try:
-            from data.fetcher_mcp import MCPDataFetcher
-            self.data_fetcher = MCPDataFetcher()
+            self.selector = StockSelector()
+            print("全市场选股器初始化成功")
         except Exception as e:
-            print(f"数据获取器初始化失败: {e}")
-
-    def calculate_scores(self, codes: List[str], profile: str = "R4") -> pd.DataFrame:
-        """计算综合得分"""
-        if not self.data_fetcher:
-            return pd.DataFrame()
-
-        # 获取每日指标
-        try:
-            df = self.data_fetcher.get_daily_basic(codes)
-            if df.empty:
-                return pd.DataFrame()
-        except:
-            return pd.DataFrame()
-
-        # 因子计算
-        weights = self.R4_WEIGHTS if profile == "R4" else self.R5_WEIGHTS
-
-        # 质量因子 (ROE, 现金流)
-        df['quality_score'] = 50 + (df.get('pe', 50).apply(lambda x: max(0, 100 - x))) * 0.3
-
-        # 成长因子 (营收增长)
-        df['growth_score'] = 50
-
-        # 动量因子 (使用换手率代理)
-        df['momentum_score'] = 50 + df.get('turnover_rate', 0) * 10
-
-        # 价值因子 (PE, PB)
-        df['value_score'] = df.get('pe', 50).apply(lambda x: max(0, 100 - min(x, 100)))
-
-        # 小盘因子 (市值倒数)
-        if 'total_mv' in df.columns:
-            max_mv = df['total_mv'].max()
-            df['small_cap_score'] = 100 * (1 - df['total_mv'] / max_mv)
-        else:
-            df['small_cap_score'] = 50
-
-        # 低波因子
-        df['low_volatility_score'] = 50
-
-        # 综合得分
-        df['composite_score'] = (
-            df['quality_score'] * weights['quality'] +
-            df['growth_score'] * weights['growth'] +
-            df['momentum_score'] * weights['momentum'] +
-            df['value_score'] * weights['value'] +
-            df['small_cap_score'] * weights['small_cap'] +
-            df['low_volatility_score'] * weights['low_volatility']
-        )
-
-        return df.sort_values('composite_score', ascending=False)
+            print(f"选股器初始化失败: {e}")
 
     def select_stocks(self,
                       capital: float,
                       profile: str = "R4",
                       n_positions: int = 30) -> List[Dict]:
         """
-        选股
+        全市场选股
 
         Args:
             capital: 资金规模
@@ -198,113 +152,23 @@ class StrategyEngine:
         Returns:
             持仓列表
         """
-        if not self.data_fetcher:
-            return self._mock_positions(capital, profile, n_positions)
+        if self.selector:
+            try:
+                positions = self.selector.select(
+                    capital=capital,
+                    profile=profile,
+                    n_positions=n_positions,
+                    min_list_days=self.FROZEN_PARAMS['min_list_days'],
+                    min_adv=self.FROZEN_PARAMS['min_adv']
+                )
+                if positions:
+                    return positions
+            except Exception as e:
+                print(f"选股失败: {e}")
 
-        # 获取所有股票
-        all_stocks = self.data_fetcher.get_all_stocks()
-        if not all_stocks:
-            return self._mock_positions(capital, profile, n_positions)
-
-        # 取前100只计算得分
-        sample_codes = all_stocks[:100]
-        df = self.calculate_scores(sample_codes, profile)
-
-        if df.empty:
-            return self._mock_positions(capital, profile, n_positions)
-
-        # 取Top N
-        df = df.head(n_positions)
-
-        # 权重分配
-        weights = self._assign_weights(df)
-
-        positions = []
-        for _, row in df.iterrows():
-            code = row['code']
-            weight = weights.get(code, 1.0 / n_positions)
-            price = row.get('close', 10.0)
-            amount = capital * weight
-            shares = int(amount / price / 100) * 100  # 整手
-
-            positions.append({
-                'code': code,
-                'name': '',
-                'weight': round(weight, 4),
-                'shares': shares,
-                'price': round(price, 2),
-                'amount': round(shares * price, 2),
-                'industry': '',
-                'score': round(row.get('composite_score', 0), 2)
-            })
-
-        return positions
-
-    def _assign_weights(self, df: pd.DataFrame) -> Dict[str, float]:
-        """分配权重"""
-        n = len(df)
-        if n == 0:
-            return {}
-
-        # 按得分排名分档
-        df['rank'] = range(1, n + 1)
-        df['pct'] = df['rank'] / n
-
-        # 权重档位
-        def get_weight(pct):
-            if pct <= 0.1:
-                return 2.0
-            elif pct <= 0.3:
-                return 1.5
-            elif pct <= 0.5:
-                return 1.2
-            elif pct <= 0.7:
-                return 1.0
-            else:
-                return 0.8
-
-        df['weight_mult'] = df['pct'].apply(get_weight)
-
-        # 归一化
-        total = df['weight_mult'].sum()
-        df['weight'] = df['weight_mult'] / total
-
-        return dict(zip(df['code'], df['weight']))
-
-    def _mock_positions(self, capital: float, profile: str, n: int) -> List[Dict]:
-        """模拟持仓（数据不可用时）"""
-        # 使用预定义的优质股票池
-        mock_stocks = [
-            '600519', '000858', '600036', '601318', '000333',
-            '600276', '002415', '300750', '601012', '002352',
-            '600887', '000002', '601166', '600030', '002304',
-            '300015', '002475', '601288', '600000', '601398',
-            '600016', '601988', '600031', '000651', '002236',
-            '300059', '600309', '002271', '601888', '600585',
-        ]
-
-        positions = []
-        base_weight = 1.0 / min(n, len(mock_stocks))
-
-        for i, code in enumerate(mock_stocks[:n]):
-            weight = base_weight * (1.5 if i < 5 else 1.0 if i < 15 else 0.8)
-            positions.append({
-                'code': code,
-                'name': '',
-                'weight': round(weight, 4),
-                'shares': int(capital * weight / 50 / 100) * 100,
-                'price': 50.0,
-                'amount': round(capital * weight, 2),
-                'industry': '',
-                'score': round(90 - i, 2)
-            })
-
-        # 归一化
-        total = sum(p['weight'] for p in positions)
-        for p in positions:
-            p['weight'] = round(p['weight'] / total, 4)
-
-        return positions
+        # 备选: 返回空列表而不是 mock 数据
+        print("警告: 选股失败，返回空列表")
+        return []
 
     def calculate_rebalance(self,
                             capital: float,

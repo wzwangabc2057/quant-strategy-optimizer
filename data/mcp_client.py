@@ -248,6 +248,87 @@ class MCPClient:
             return records
         return []
 
+    def get_daily_quotes_by_date(self,
+                                trade_date: str,
+                                page: int = 1,
+                                page_size: int = 5000) -> List[Dict]:
+        """
+        按交易日期批量获取全市场行情（替代逐只股票查询）
+
+        Args:
+            trade_date: 交易日期 (YYYYMMDD)
+            page: 页码
+            page_size: 每页数量
+
+        Returns:
+            全市场行情数据列表
+        """
+        args = {'trade_date': trade_date, 'page': page, 'page_size': page_size}
+        result = self.call_tool('tushare_daily_quote_query', args)
+        if result:
+            records = []
+            for text in result:
+                try:
+                    records.append(json.loads(text))
+                except:
+                    pass
+            return records
+        return []
+
+    def get_daily_basic_by_date(self,
+                                trade_date: str,
+                                page: int = 1,
+                                page_size: int = 5000) -> List[Dict]:
+        """
+        按交易日期批量获取全市场每日指标
+
+        Args:
+            trade_date: 交易日期 (YYYYMMDD)
+            page: 页码
+            page_size: 每页数量
+
+        Returns:
+            全市场每日指标列表
+        """
+        args = {'trade_date': trade_date, 'page': page, 'page_size': page_size}
+        result = self.call_tool('tushare_daily_basic_query', args)
+        if result:
+            records = []
+            for text in result:
+                try:
+                    records.append(json.loads(text))
+                except:
+                    pass
+            return records
+        return []
+
+    def get_income_data(self,
+                        ts_code: str,
+                        page: int = 1,
+                        page_size: int = 5000) -> List[Dict]:
+        """
+        获取利润表数据（用于成长因子计算）
+
+        Args:
+            ts_code: 股票代码 (如 000001.SZ)
+            page: 页码
+            page_size: 每页数量
+
+        Returns:
+            利润表数据列表
+        """
+        args = {'ts_code': ts_code, 'page': page, 'page_size': page_size}
+        result = self.call_tool('tushare_income_query', args)
+        if result:
+            records = []
+            for text in result:
+                try:
+                    records.append(json.loads(text))
+                except:
+                    pass
+            return records
+        return []
+
     def get_moneyflow(self,
                       start_date: str = None,
                       end_date: str = None) -> List[Dict]:
